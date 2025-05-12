@@ -186,6 +186,7 @@ func TestGetDocumentsByTags(t *testing.T) {
 				Content:       "Content 1",
 				Tags:          []int{1, 2},
 				Correspondent: 1,
+				CreatedDate:   "1999-09-01",
 			},
 			{
 				ID:            2,
@@ -193,6 +194,7 @@ func TestGetDocumentsByTags(t *testing.T) {
 				Content:       "Content 2",
 				Tags:          []int{2, 3},
 				Correspondent: 2,
+				CreatedDate:   "1999-09-02",
 			},
 		},
 	}
@@ -233,6 +235,7 @@ func TestGetDocumentsByTags(t *testing.T) {
 			Content:       "Content 1",
 			Tags:          []string{"tag1", "tag2"},
 			Correspondent: "Alpha",
+			CreatedDate:   "1999-09-01",
 		},
 		{
 			ID:            2,
@@ -240,6 +243,7 @@ func TestGetDocumentsByTags(t *testing.T) {
 			Content:       "Content 2",
 			Tags:          []string{"tag2", "tag3"},
 			Correspondent: "Beta",
+			CreatedDate:   "1999-09-02",
 		},
 	}
 
@@ -283,13 +287,15 @@ func TestUpdateDocuments(t *testing.T) {
 		{
 			ID: 1,
 			OriginalDocument: Document{
-				ID:    1,
-				Title: "Old Title",
-				Tags:  []string{"tag1", "tag3", "manual", "removeMe"},
+				ID:          1,
+				Title:       "Old Title",
+				Tags:        []string{"tag1", "tag3", "manual", "removeMe"},
+				CreatedDate: "1999-09-01",
 			},
-			SuggestedTitle: "New Title",
-			SuggestedTags:  []string{"tag2", "tag3"},
-			RemoveTags:     []string{"removeMe"},
+			SuggestedTitle:       "New Title",
+			SuggestedTags:        []string{"tag2", "tag3"},
+			RemoveTags:           []string{"removeMe"},
+			SuggestedCreatedDate: "1999-09-02",
 		},
 	}
 	idTag1 := 1
@@ -334,7 +340,8 @@ func TestUpdateDocuments(t *testing.T) {
 		expectedFields := map[string]interface{}{
 			"title": "New Title",
 			// do not keep previous tags since the tag generation will already take care to include old ones:
-			"tags": []interface{}{float64(idTag2), float64(idTag3)},
+			"tags":         []interface{}{float64(idTag2), float64(idTag3)},
+			"created_date": "1999-09-02",
 		}
 
 		assert.Equal(t, expectedFields, updatedFields)
@@ -377,7 +384,7 @@ func TestDownloadDocumentAsImages(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	imagePaths, err := env.client.DownloadDocumentAsImages(ctx, document.ID, 0)
+	imagePaths, totalPages, err := env.client.DownloadDocumentAsImages(ctx, document.ID, 0)
 	require.NoError(t, err)
 
 	// Verify that exatly one page was extracted
@@ -388,6 +395,9 @@ func TestDownloadDocumentAsImages(t *testing.T) {
 		_, err := os.Stat(imagePath)
 		assert.NoError(t, err)
 	}
+
+	// Verify total pages count
+	assert.Equal(t, 1, totalPages, "Total pages should be 1")
 }
 
 func TestDownloadDocumentAsImages_ManyPages(t *testing.T) {
@@ -414,10 +424,10 @@ func TestDownloadDocumentAsImages_ManyPages(t *testing.T) {
 	env.client.CacheFolder = "tests/tmp"
 	// Clean the cache folder
 	os.RemoveAll(env.client.CacheFolder)
-	imagePaths, err := env.client.DownloadDocumentAsImages(ctx, document.ID, 50)
+	imagePaths, totalPages, err := env.client.DownloadDocumentAsImages(ctx, document.ID, 50)
 	require.NoError(t, err)
 
-	// Verify that exatly 50 pages were extracted - the original doc contains 52 pages
+	// Verify that exactly 50 pages were extracted - the original doc contains 52 pages
 	assert.Len(t, imagePaths, 50)
 	// The path shall end with tests/tmp/document-321/page000.jpg
 	for _, imagePath := range imagePaths {
@@ -425,4 +435,7 @@ func TestDownloadDocumentAsImages_ManyPages(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Contains(t, imagePath, "tests/tmp/document-321/page")
 	}
+
+	// Verify total pages count
+	assert.Equal(t, 52, totalPages, "Total pages should be 52")
 }

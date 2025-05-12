@@ -13,6 +13,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/mistral"
 	"github.com/tmc/langchaingo/llms/ollama"
 	"github.com/tmc/langchaingo/llms/openai"
 )
@@ -22,7 +23,7 @@ type LLMProvider struct {
 	provider string
 	model    string
 	llm      llms.Model
-	template string // OCR prompt template
+	prompt   string // OCR prompt template
 }
 
 func newLLMProvider(config Config) (*LLMProvider, error) {
@@ -42,6 +43,9 @@ func newLLMProvider(config Config) (*LLMProvider, error) {
 	case "ollama":
 		logger.Debug("Initializing Ollama vision model")
 		model, err = createOllamaClient(config)
+	case "mistral":
+		logger.Debug("Initializing Mistral vision model")
+		model, err = createMistralClient(config)
 	default:
 		return nil, fmt.Errorf("unsupported vision LLM provider: %s", config.VisionLLMProvider)
 	}
@@ -56,22 +60,23 @@ func newLLMProvider(config Config) (*LLMProvider, error) {
 		provider: config.VisionLLMProvider,
 		model:    config.VisionLLMModel,
 		llm:      model,
-		template: defaultOCRPrompt,
+		prompt:   config.VisionLLMPrompt,
 	}, nil
 }
 
-func (p *LLMProvider) ProcessImage(ctx context.Context, imageContent []byte) (string, error) {
+func (p *LLMProvider) ProcessImage(ctx context.Context, imageContent []byte, pageNumber int) (*OCRResult, error) {
 	logger := log.WithFields(logrus.Fields{
 		"provider": p.provider,
 		"model":    p.model,
+		"page":     pageNumber,
 	})
-	logger.Debug("Starting OCR processing")
+	logger.Debug("Starting LLM OCR processing")
 
 	// Log the image dimensions
 	img, _, err := image.Decode(bytes.NewReader(imageContent))
 	if err != nil {
 		logger.WithError(err).Error("Failed to decode image")
-		return "", fmt.Errorf("error decoding image: %w", err)
+		return nil, fmt.Errorf("error decoding image: %w", err)
 	}
 	bounds := img.Bounds()
 	logger.WithFields(logrus.Fields{
@@ -79,21 +84,25 @@ func (p *LLMProvider) ProcessImage(ctx context.Context, imageContent []byte) (st
 		"height": bounds.Dy(),
 	}).Debug("Image dimensions")
 
+	logger.Debugf("Prompt: %s", p.prompt)
+
 	// Prepare content parts based on provider type
 	var parts []llms.ContentPart
-	if strings.ToLower(p.provider) != "openai" {
-		logger.Debug("Using binary image format for non-OpenAI provider")
-		parts = []llms.ContentPart{
-			llms.BinaryPart("image/jpeg", imageContent),
-			llms.TextPart(p.template),
-		}
+
+	var imagePart llms.ContentPart
+	providerName := strings.ToLower(p.provider)
+
+	if providerName == "openai" || providerName == "mistral" {
+		logger.Info("Using OpenAI image format")
+		imagePart = llms.ImageURLPart("data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(imageContent))
 	} else {
-		logger.Debug("Using base64 image format for OpenAI provider")
-		base64Image := base64.StdEncoding.EncodeToString(imageContent)
-		parts = []llms.ContentPart{
-			llms.ImageURLPart(fmt.Sprintf("data:image/jpeg;base64,%s", base64Image)),
-			llms.TextPart(p.template),
-		}
+		logger.Info("Using binary image format")
+		imagePart = llms.BinaryPart("image/jpeg", imageContent)
+	}
+
+	parts = []llms.ContentPart{
+		imagePart,
+		llms.TextPart(p.prompt),
 	}
 
 	// Convert the image to text
@@ -106,11 +115,18 @@ func (p *LLMProvider) ProcessImage(ctx context.Context, imageContent []byte) (st
 	})
 	if err != nil {
 		logger.WithError(err).Error("Failed to get response from vision model")
-		return "", fmt.Errorf("error getting response from LLM: %w", err)
+		return nil, fmt.Errorf("error getting response from LLM: %w", err)
 	}
 
-	logger.WithField("content_length", len(completion.Choices[0].Content)).Info("Successfully processed image")
-	return completion.Choices[0].Content, nil
+	result := &OCRResult{
+		Text: completion.Choices[0].Content,
+		Metadata: map[string]string{
+			"provider": p.provider,
+			"model":    p.model,
+		},
+	}
+	logger.WithField("content_length", len(result.Text)).Info("Successfully processed image")
+	return result, nil
 }
 
 // createOpenAIClient creates a new OpenAI vision model client
@@ -137,4 +153,14 @@ func createOllamaClient(config Config) (llms.Model, error) {
 	)
 }
 
-const defaultOCRPrompt = `Just transcribe the text in this image and preserve the formatting and layout (high quality OCR). Do that for ALL the text in the image. Be thorough and pay attention. This is very important. The image is from a text document so be sure to continue until the bottom of the page. Thanks a lot! You tend to forget about some text in the image so please focus! Use markdown format but without a code block.`
+// createMistralClient creates a new Mistral vision model client
+func createMistralClient(config Config) (llms.Model, error) {
+	apiKey := os.Getenv("MISTRAL_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("Mistral API key is not set")
+	}
+	return mistral.New(
+		mistral.WithModel(config.VisionLLMModel),
+		mistral.WithAPIKey(apiKey),
+	)
+}

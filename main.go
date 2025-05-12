@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -8,7 +9,6 @@ import (
 	"paperless-gpt/ocr"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/mistral"
 	"github.com/tmc/langchaingo/llms/ollama"
 	"github.com/tmc/langchaingo/llms/openai"
 	"gorm.io/gorm"
@@ -32,31 +33,49 @@ var (
 	log = logrus.New()
 
 	// Environment Variables
-	paperlessInsecureSkipVerify = os.Getenv("PAPERLESS_INSECURE_SKIP_VERIFY") == "true"
-	correspondentBlackList      = strings.Split(os.Getenv("CORRESPONDENT_BLACK_LIST"), ",")
-	paperlessBaseURL            = os.Getenv("PAPERLESS_BASE_URL")
-	paperlessAPIToken           = os.Getenv("PAPERLESS_API_TOKEN")
-	openaiAPIKey                = os.Getenv("OPENAI_API_KEY")
-	manualTag                   = os.Getenv("MANUAL_TAG")
-	autoTag                     = os.Getenv("AUTO_TAG")
-	manualOcrTag                = os.Getenv("MANUAL_OCR_TAG") // Not used yet
-	autoOcrTag                  = os.Getenv("AUTO_OCR_TAG")
-	llmProvider                 = os.Getenv("LLM_PROVIDER")
-	llmModel                    = os.Getenv("LLM_MODEL")
-	visionLlmProvider           = os.Getenv("VISION_LLM_PROVIDER")
-	visionLlmModel              = os.Getenv("VISION_LLM_MODEL")
-	logLevel                    = strings.ToLower(os.Getenv("LOG_LEVEL"))
-	listenInterface             = os.Getenv("LISTEN_INTERFACE")
-	autoGenerateTitle           = os.Getenv("AUTO_GENERATE_TITLE")
-	autoGenerateTags            = os.Getenv("AUTO_GENERATE_TAGS")
-	autoGenerateCorrespondents  = os.Getenv("AUTO_GENERATE_CORRESPONDENTS")
-	limitOcrPages               int // Will be read from OCR_LIMIT_PAGES
-	tokenLimit                  = 0 // Will be read from TOKEN_LIMIT
+	paperlessInsecureSkipVerify   = os.Getenv("PAPERLESS_INSECURE_SKIP_VERIFY") == "true"
+	correspondentBlackList        = strings.Split(os.Getenv("CORRESPONDENT_BLACK_LIST"), ",")
+	paperlessBaseURL              = os.Getenv("PAPERLESS_BASE_URL")
+	paperlessAPIToken             = os.Getenv("PAPERLESS_API_TOKEN")
+	azureDocAIEndpoint            = os.Getenv("AZURE_DOCAI_ENDPOINT")
+	azureDocAIKey                 = os.Getenv("AZURE_DOCAI_KEY")
+	azureDocAIModelID             = os.Getenv("AZURE_DOCAI_MODEL_ID")
+	azureDocAITimeout             = os.Getenv("AZURE_DOCAI_TIMEOUT_SECONDS")
+	AzureDocAIOutputContentFormat = os.Getenv("AZURE_DOCAI_OUTPUT_CONTENT_FORMAT")
+	openaiAPIKey                  = os.Getenv("OPENAI_API_KEY")
+	manualTag                     = os.Getenv("MANUAL_TAG")
+	autoTag                       = os.Getenv("AUTO_TAG")
+	manualOcrTag                  = os.Getenv("MANUAL_OCR_TAG") // Not used yet
+	autoOcrTag                    = os.Getenv("AUTO_OCR_TAG")
+	llmProvider                   = os.Getenv("LLM_PROVIDER")
+	llmModel                      = os.Getenv("LLM_MODEL")
+	visionLlmProvider             = os.Getenv("VISION_LLM_PROVIDER")
+	visionLlmModel                = os.Getenv("VISION_LLM_MODEL")
+	logLevel                      = strings.ToLower(os.Getenv("LOG_LEVEL"))
+	listenInterface               = os.Getenv("LISTEN_INTERFACE")
+	autoGenerateTitle             = os.Getenv("AUTO_GENERATE_TITLE")
+	autoGenerateTags              = os.Getenv("AUTO_GENERATE_TAGS")
+	autoGenerateCorrespondents    = os.Getenv("AUTO_GENERATE_CORRESPONDENTS")
+	autoGenerateCreatedDate       = os.Getenv("AUTO_GENERATE_CREATED_DATE")
+	limitOcrPages                 int // Will be read from OCR_LIMIT_PAGES
+	tokenLimit                    = 0 // Will be read from TOKEN_LIMIT
+	createLocalHOCR               = os.Getenv("CREATE_LOCAL_HOCR") == "true"
+	createLocalPDF                = os.Getenv("CREATE_LOCAL_PDF") == "true"
+	localHOCRPath                 = os.Getenv("LOCAL_HOCR_PATH")
+	localPDFPath                  = os.Getenv("LOCAL_PDF_PATH")
+	pdfUpload                     = os.Getenv("PDF_UPLOAD") == "true"
+	pdfReplace                    = os.Getenv("PDF_REPLACE") == "true"
+	pdfCopyMetadata               = os.Getenv("PDF_COPY_METADATA") == "true"
+	pdfOCRCompleteTag             = os.Getenv("PDF_OCR_COMPLETE_TAG")
+	pdfOCRTagging                 = os.Getenv("PDF_OCR_TAGGING") == "true"
+	doclingURL                    = os.Getenv("DOCLING_URL")
+	doclingImageExportMode        = os.Getenv("DOCLING_IMAGE_EXPORT_MODE")
 
 	// Templates
 	titleTemplate         *template.Template
 	tagTemplate           *template.Template
 	correspondentTemplate *template.Template
+	createdDateTemplate   *template.Template
 	ocrTemplate           *template.Template
 	templateMutex         sync.RWMutex
 
@@ -110,19 +129,40 @@ The content is likely in {{.Language}}.
 Document Content:
 {{.Content}}
 `
+	defaultCreatedDateTemplate = `I will provide you with the content of a document. Your task is to find the date when the document was created.
+Respond only with the date in YYYY-MM-DD format, without any additional information. If no day was found, use the first day of the month. If no month was found, use January. If no date was found at all, answer with today's date.
+The content is likely in {{.Language}}. Today's date is {{.Today}}.
+
+Content:
+{{.Content}}
+`
 	defaultOcrPrompt = `Just transcribe the text in this image and preserve the formatting and layout (high quality OCR). Do that for ALL the text in the image. Be thorough and pay attention. This is very important. The image is from a text document so be sure to continue until the bottom of the page. Thanks a lot! You tend to forget about some text in the image so please focus! Use markdown format but without a code block.`
 )
 
 // App struct to hold dependencies
 type App struct {
-	Client      *PaperlessClient
-	Database    *gorm.DB
-	LLM         llms.Model
-	VisionLLM   llms.Model
-	ocrProvider ocr.Provider // OCR provider interface
+	Client            ClientInterface
+	Database          *gorm.DB
+	LLM               llms.Model
+	VisionLLM         llms.Model
+	ocrProvider       ocr.Provider      // OCR provider interface
+	docProcessor      DocumentProcessor // Optional: Can be used for mocking
+	localHOCRPath     string            // Path for saving hOCR files locally
+	localPDFPath      string            // Path for saving PDF files locally
+	createLocalHOCR   bool              // Whether to save hOCR files locally
+	createLocalPDF    bool              // Whether to create PDF files locally
+	pdfUpload         bool              // Whether to upload processed PDFs to paperless-ngx
+	pdfReplace        bool              // Whether to replace original document after upload
+	pdfCopyMetadata   bool              // Whether to copy metadata from original to uploaded PDF
+	pdfOCRCompleteTag string            // Tag to add to documents that have been OCR processed
+	pdfOCRTagging     bool              // Whether to add the OCR complete tag to processed PDFs
 }
 
 func main() {
+	// Context for proper control of background-thread
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Validate Environment Variables
 	validateOrDefaultEnvVars()
 
@@ -160,13 +200,42 @@ func main() {
 		providerType = "llm" // Default to LLM provider
 	}
 
+	var promptBuffer bytes.Buffer
+	err = ocrTemplate.Execute(&promptBuffer, map[string]interface{}{
+		"Language": getLikelyLanguage(),
+	})
+	if err != nil {
+		log.Fatalf("error executing tag template: %v", err)
+	}
+
+	ocrPrompt := promptBuffer.String()
+
 	ocrConfig := ocr.Config{
-		Provider:          providerType,
-		GoogleProjectID:   os.Getenv("GOOGLE_PROJECT_ID"),
-		GoogleLocation:    os.Getenv("GOOGLE_LOCATION"),
-		GoogleProcessorID: os.Getenv("GOOGLE_PROCESSOR_ID"),
-		VisionLLMProvider: visionLlmProvider,
-		VisionLLMModel:    visionLlmModel,
+		Provider:                 providerType,
+		GoogleProjectID:          os.Getenv("GOOGLE_PROJECT_ID"),
+		GoogleLocation:           os.Getenv("GOOGLE_LOCATION"),
+		GoogleProcessorID:        os.Getenv("GOOGLE_PROCESSOR_ID"),
+		VisionLLMProvider:        visionLlmProvider,
+		VisionLLMModel:           visionLlmModel,
+		VisionLLMPrompt:          ocrPrompt,
+		AzureEndpoint:            azureDocAIEndpoint,
+		AzureAPIKey:              azureDocAIKey,
+		AzureModelID:             azureDocAIModelID,
+		AzureOutputContentFormat: AzureDocAIOutputContentFormat,
+		MistralAPIKey:            os.Getenv("MISTRAL_API_KEY"),
+		MistralModel:             os.Getenv("MISTRAL_MODEL"),
+		DoclingURL:               doclingURL,
+		DoclingImageExportMode:   doclingImageExportMode,
+		EnableHOCR:               true, // Always generate hOCR struct if provider supports it
+	}
+
+	// Parse Azure timeout if set
+	if azureDocAITimeout != "" {
+		if timeout, err := strconv.Atoi(azureDocAITimeout); err == nil {
+			ocrConfig.AzureTimeout = timeout
+		} else {
+			log.Warnf("Invalid AZURE_DOCAI_TIMEOUT_SECONDS value: %v, using default", err)
+		}
 	}
 
 	// If provider is LLM, but no VISION_LLM_PROVIDER is set, don't initialize OCR provider
@@ -181,11 +250,21 @@ func main() {
 
 	// Initialize App with dependencies
 	app := &App{
-		Client:      client,
-		Database:    database,
-		LLM:         llm,
-		VisionLLM:   visionLlm,
-		ocrProvider: ocrProvider,
+		Client:            client,
+		Database:          database,
+		LLM:               llm,
+		VisionLLM:         visionLlm,
+		ocrProvider:       ocrProvider,
+		docProcessor:      nil, // App itself implements DocumentProcessor
+		localHOCRPath:     localHOCRPath,
+		localPDFPath:      localPDFPath,
+		createLocalHOCR:   createLocalHOCR,
+		createLocalPDF:    createLocalPDF,
+		pdfUpload:         pdfUpload,
+		pdfReplace:        pdfReplace,
+		pdfCopyMetadata:   pdfCopyMetadata,
+		pdfOCRCompleteTag: pdfOCRCompleteTag,
+		pdfOCRTagging:     pdfOCRTagging,
 	}
 
 	if app.isOcrEnabled() {
@@ -203,48 +282,8 @@ func main() {
 		}
 	}
 
-	// Start background process for auto-tagging
-	go func() {
-		minBackoffDuration := 10 * time.Second
-		maxBackoffDuration := time.Hour
-		pollingInterval := 10 * time.Second
-
-		backoffDuration := minBackoffDuration
-		for {
-			processedCount, err := func() (int, error) {
-				count := 0
-				if app.isOcrEnabled() {
-					ocrCount, err := app.processAutoOcrTagDocuments()
-					if err != nil {
-						return 0, fmt.Errorf("error in processAutoOcrTagDocuments: %w", err)
-					}
-					count += ocrCount
-				}
-				autoCount, err := app.processAutoTagDocuments()
-				if err != nil {
-					return 0, fmt.Errorf("error in processAutoTagDocuments: %w", err)
-				}
-				count += autoCount
-				return count, nil
-			}()
-
-			if err != nil {
-				log.Errorf("Error in processAutoTagDocuments: %v", err)
-				time.Sleep(backoffDuration)
-				backoffDuration *= 2 // Exponential backoff
-				if backoffDuration > maxBackoffDuration {
-					log.Warnf("Repeated errors in processAutoTagDocuments detected. Setting backoff to %v", maxBackoffDuration)
-					backoffDuration = maxBackoffDuration
-				}
-			} else {
-				backoffDuration = minBackoffDuration
-			}
-
-			if processedCount == 0 {
-				time.Sleep(pollingInterval)
-			}
-		}
-	}()
+	// Start Background-Tasks for Auto-Tagging and Auto-OCR (if enabled)
+	StartBackgroundTasks(ctx, app)
 
 	// Create a Gin router with default middleware (logger and recovery)
 	router := gin.Default()
@@ -303,9 +342,6 @@ func main() {
 	// Instead of wildcard, serve specific files
 	router.GET("/favicon.ico", func(c *gin.Context) {
 		serveEmbeddedFile(c, "", "favicon.ico")
-	})
-	router.GET("/vite.svg", func(c *gin.Context) {
-		serveEmbeddedFile(c, "", "vite.svg")
 	})
 	router.GET("/assets/*filepath", func(c *gin.Context) {
 		filepath := c.Param("filepath")
@@ -406,6 +442,10 @@ func validateOrDefaultEnvVars() {
 		autoOcrTag = "paperless-gpt-ocr-auto"
 	}
 
+	if pdfOCRCompleteTag == "" {
+		pdfOCRCompleteTag = "paperless-gpt-ocr-complete"
+	}
+
 	if paperlessBaseURL == "" {
 		log.Fatal("Please set the PAPERLESS_BASE_URL environment variable.")
 	}
@@ -418,16 +458,50 @@ func validateOrDefaultEnvVars() {
 		log.Fatal("Please set the LLM_PROVIDER environment variable.")
 	}
 
-	if visionLlmProvider != "" && visionLlmProvider != "openai" && visionLlmProvider != "ollama" {
-		log.Fatal("Please set the LLM_PROVIDER environment variable to 'openai' or 'ollama'.")
+	if visionLlmProvider != "" && visionLlmProvider != "openai" && visionLlmProvider != "ollama" && visionLlmProvider != "mistral" {
+		log.Fatal("Please set the VISION_LLM_PROVIDER environment variable to 'openai', 'ollama', or 'mistral'.")
+	}
+
+	// Validate OCR provider if set
+	ocrProvider := os.Getenv("OCR_PROVIDER")
+	if ocrProvider == "azure" {
+		if azureDocAIEndpoint == "" {
+			log.Fatal("Please set the AZURE_DOCAI_ENDPOINT environment variable for Azure provider")
+		}
+		if azureDocAIKey == "" {
+			log.Fatal("Please set the AZURE_DOCAI_KEY environment variable for Azure provider")
+		}
+	}
+
+	if ocrProvider == "docling" {
+		if doclingURL == "" {
+			log.Fatal("Please set the DOCLING_URL environment variable for Docling provider")
+		}
+		if doclingImageExportMode == "" {
+			doclingImageExportMode = "embedded" // Default to PNG
+			log.Infof("DOCLING_IMAGE_EXPORT_MODE not set, defaulting to %s", doclingImageExportMode)
+		}
 	}
 
 	if llmModel == "" {
 		log.Fatal("Please set the LLM_MODEL environment variable.")
 	}
 
-	if (llmProvider == "openai" || visionLlmProvider == "openai") && openaiAPIKey == "" {
-		log.Fatal("Please set the OPENAI_API_KEY environment variable for OpenAI provider.")
+	if llmProvider == "mistral" {
+		if os.Getenv("MISTRAL_API_KEY") == "" {
+			log.Fatal("Please set the MISTRAL_API_KEY environment variable for Mistral provider.")
+		}
+	} else if llmProvider == "openai" || visionLlmProvider == "openai" {
+		if openaiAPIKey == "" {
+			log.Fatal("Please set the OPENAI_API_KEY environment variable for OpenAI provider.")
+		}
+
+		// Check Azure specific configuration
+		if strings.ToLower(os.Getenv("OPENAI_API_TYPE")) == "azure" {
+			if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL == "" {
+				log.Fatal("Please set the OPENAI_BASE_URL environment variable for Azure OpenAI.")
+			}
+		}
 	}
 
 	// Initialize token limit from environment variable
@@ -440,104 +514,59 @@ func validateOrDefaultEnvVars() {
 			log.Infof("Using token limit: %d", tokenLimit)
 		}
 	}
+
+	// Set default for hOCR output path
+	if localHOCRPath == "" && createLocalHOCR {
+		localHOCRPath = "/app/hocr"
+
+		// Fallback dir
+		if _, err := os.Stat("/app"); os.IsNotExist(err) {
+			localHOCRPath = filepath.Join(os.TempDir(), "hocr")
+			log.Warnf("'/app' directory not found, using %s as fallback for hOCR output", localHOCRPath)
+		}
+	}
+
+	// Set default for PDF output path
+	if localPDFPath == "" && createLocalPDF {
+		localPDFPath = "/app/pdf"
+
+		// Fallback dir
+		if _, err := os.Stat("/app"); os.IsNotExist(err) {
+			localPDFPath = filepath.Join(os.TempDir(), "pdf")
+			log.Warnf("'/app' directory not found, using %s as fallback for PDF output", localPDFPath)
+		}
+	}
+
+	// Log OCR feature settings
+	ocrProviderEnv := os.Getenv("OCR_PROVIDER")
+	if ocrProviderEnv != "" {
+		log.Infof("OCR provider: %s", os.Getenv("OCR_PROVIDER"))
+
+		if createLocalHOCR {
+			log.Infof("hOCR file creation is enabled, output path: %s", localHOCRPath)
+		}
+
+		if createLocalPDF {
+			log.Infof("PDF generation is enabled, output path: %s", localPDFPath)
+		}
+	}
+	if pdfUpload {
+		log.Infof("PDF upload to paperless-ngx is enabled")
+		if pdfReplace {
+			log.Infof("Original documents will be replaced after OCR upload")
+		}
+		if pdfCopyMetadata {
+			log.Infof("Metadata will be copied from original documents")
+		}
+	}
+	if pdfOCRTagging {
+		log.Infof("OCR complete tagging enabled with tag: %s", pdfOCRCompleteTag)
+	}
 }
 
 // documentLogger creates a logger with document context
 func documentLogger(documentID int) *logrus.Entry {
 	return log.WithField("document_id", documentID)
-}
-
-// processAutoTagDocuments handles the background auto-tagging of documents
-func (app *App) processAutoTagDocuments() (int, error) {
-	ctx := context.Background()
-
-	documents, err := app.Client.GetDocumentsByTags(ctx, []string{autoTag}, 25)
-	if err != nil {
-		return 0, fmt.Errorf("error fetching documents with autoTag: %w", err)
-	}
-
-	if len(documents) == 0 {
-		log.Debugf("No documents with tag %s found", autoTag)
-		return 0, nil // No documents to process
-	}
-
-	log.Debugf("Found at least %d remaining documents with tag %s", len(documents), autoTag)
-
-	processedCount := 0
-	for _, document := range documents {
-		// Skip documents that have the autoOcrTag
-		if slices.Contains(document.Tags, autoOcrTag) {
-			log.Debugf("Skipping document %d as it has the OCR tag %s", document.ID, autoOcrTag)
-			continue
-		}
-
-		docLogger := documentLogger(document.ID)
-		docLogger.Info("Processing document for auto-tagging")
-
-		suggestionRequest := GenerateSuggestionsRequest{
-			Documents:              []Document{document},
-			GenerateTitles:         strings.ToLower(autoGenerateTitle) != "false",
-			GenerateTags:           strings.ToLower(autoGenerateTags) != "false",
-			GenerateCorrespondents: strings.ToLower(autoGenerateCorrespondents) != "false",
-		}
-
-		suggestions, err := app.generateDocumentSuggestions(ctx, suggestionRequest, docLogger)
-		if err != nil {
-			return processedCount, fmt.Errorf("error generating suggestions for document %d: %w", document.ID, err)
-		}
-
-		err = app.Client.UpdateDocuments(ctx, suggestions, app.Database, false)
-		if err != nil {
-			return processedCount, fmt.Errorf("error updating document %d: %w", document.ID, err)
-		}
-
-		docLogger.Info("Successfully processed document")
-		processedCount++
-	}
-	return processedCount, nil
-}
-
-// processAutoOcrTagDocuments handles the background auto-tagging of OCR documents
-func (app *App) processAutoOcrTagDocuments() (int, error) {
-	ctx := context.Background()
-
-	documents, err := app.Client.GetDocumentsByTags(ctx, []string{autoOcrTag}, 25)
-	if err != nil {
-		return 0, fmt.Errorf("error fetching documents with autoOcrTag: %w", err)
-	}
-
-	if len(documents) == 0 {
-		log.Debugf("No documents with tag %s found", autoOcrTag)
-		return 0, nil // No documents to process
-	}
-
-	log.Debugf("Found at least %d remaining documents with tag %s", len(documents), autoOcrTag)
-
-	for _, document := range documents {
-		docLogger := documentLogger(document.ID)
-		docLogger.Info("Processing document for OCR")
-
-		ocrContent, err := app.ProcessDocumentOCR(ctx, document.ID)
-		if err != nil {
-			return 0, fmt.Errorf("error processing OCR for document %d: %w", document.ID, err)
-		}
-		docLogger.Debug("OCR processing completed")
-
-		err = app.Client.UpdateDocuments(ctx, []DocumentSuggestion{
-			{
-				ID:               document.ID,
-				OriginalDocument: document,
-				SuggestedContent: ocrContent,
-				RemoveTags:       []string{autoOcrTag},
-			},
-		}, app.Database, false)
-		if err != nil {
-			return 0, fmt.Errorf("error updating document %d after OCR: %w", document.ID, err)
-		}
-
-		docLogger.Info("Successfully processed document OCR")
-	}
-	return 1, nil
 }
 
 // removeTagFromList removes a specific tag from a list of tags
@@ -616,6 +645,22 @@ func loadTemplates() {
 		log.Fatalf("Failed to parse correspondent template: %v", err)
 	}
 
+	// Load createdDate template
+	createdDateTemplatePath := filepath.Join(promptsDir, "created_date_prompt.tmpl")
+	createdDateTemplateContent, err := os.ReadFile(createdDateTemplatePath)
+	if err != nil {
+		log.Errorf("Could not read %s, using default template: %v", createdDateTemplatePath, err)
+		createdDateTemplateContent = []byte(defaultCreatedDateTemplate)
+		if err := os.WriteFile(createdDateTemplatePath, createdDateTemplateContent, os.ModePerm); err != nil {
+			log.Fatalf("Failed to write default date template to disk: %v", err)
+		}
+	}
+
+	createdDateTemplate, err = template.New("created_date").Funcs(sprig.FuncMap()).Parse(string(createdDateTemplateContent))
+	if err != nil {
+		log.Fatalf("Failed to parse createdDate template: %v", err)
+	}
+
 	// Load OCR template
 	ocrTemplatePath := filepath.Join(promptsDir, "ocr_prompt.tmpl")
 	ocrTemplateContent, err := os.ReadFile(ocrTemplatePath)
@@ -632,28 +677,112 @@ func loadTemplates() {
 	}
 }
 
+// getRateLimitConfig gets rate limiting configuration from environment variables
+// with LLM or VISION_LLM prefixes or default values
+func getRateLimitConfig(isVision bool) RateLimitConfig {
+	// Use LLM or VISION_LLM prefix based on the type of LLM
+	prefix := "LLM_"
+	if isVision {
+		prefix = "VISION_LLM_"
+	}
+
+	// Read environment variables with appropriate prefix
+	rpmStr := os.Getenv(prefix + "REQUESTS_PER_MINUTE")
+	maxRetriesStr := os.Getenv(prefix + "MAX_RETRIES")
+	backoffMaxWaitStr := os.Getenv(prefix + "BACKOFF_MAX_WAIT")
+
+	// Default values
+	var rpm float64 = 120                 // Default to 120 requests per minute (2/second)
+	var maxRetries int = 3                // Default to 3 retries
+	var backoffMaxWait = 30 * time.Second // Default to 30 seconds
+
+	// Parse values if provided
+	if rpmStr != "" {
+		if parsed, err := strconv.ParseFloat(rpmStr, 64); err == nil {
+			rpm = parsed
+		}
+	}
+	if maxRetriesStr != "" {
+		if parsed, err := strconv.Atoi(maxRetriesStr); err == nil {
+			maxRetries = parsed
+		}
+	}
+	if backoffMaxWaitStr != "" {
+		if parsed, err := time.ParseDuration(backoffMaxWaitStr); err == nil {
+			backoffMaxWait = parsed
+		}
+	}
+
+	return RateLimitConfig{
+		RequestsPerMinute: rpm,
+		MaxRetries:        maxRetries,
+		BackoffMaxWait:    backoffMaxWait,
+	}
+}
+
 // createLLM creates the appropriate LLM client based on the provider
 func createLLM() (llms.Model, error) {
 	switch strings.ToLower(llmProvider) {
+	case "mistral":
+		mistralApiKey := os.Getenv("MISTRAL_API_KEY")
+		if mistralApiKey == "" {
+			return nil, fmt.Errorf("Mistral API key is not set")
+		}
+		llm, err := mistral.New(
+			mistral.WithModel(llmModel),
+			mistral.WithAPIKey(mistralApiKey),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply rate limiting with isVision=false
+		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
 	case "openai":
 		if openaiAPIKey == "" {
 			return nil, fmt.Errorf("OpenAI API key is not set")
 		}
 
-		return openai.New(
+		options := []openai.Option{
 			openai.WithModel(llmModel),
 			openai.WithToken(openaiAPIKey),
 			openai.WithHTTPClient(createCustomHTTPClient()),
-		)
+		}
+
+		if strings.ToLower(os.Getenv("OPENAI_API_TYPE")) == "azure" {
+			baseURL := os.Getenv("OPENAI_BASE_URL")
+			if baseURL == "" {
+				return nil, fmt.Errorf("OPENAI_BASE_URL is required for Azure OpenAI")
+			}
+			options = append(options,
+				openai.WithAPIType(openai.APITypeAzure),
+				openai.WithBaseURL(baseURL),
+				openai.WithEmbeddingModel("this-is-not-used"), // This is mandatory for Azure by langchain-go
+			)
+		}
+
+		llm, err := openai.New(options...)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply rate limiting with isVision=false
+		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
 	case "ollama":
 		host := os.Getenv("OLLAMA_HOST")
 		if host == "" {
 			host = "http://127.0.0.1:11434"
 		}
-		return ollama.New(
+		llm, err := ollama.New(
 			ollama.WithModel(llmModel),
 			ollama.WithServerURL(host),
 		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply rate limiting with isVision=false
+		return NewRateLimitedLLM(llm, getRateLimitConfig(false)), nil
 	default:
 		return nil, fmt.Errorf("unsupported LLM provider: %s", llmProvider)
 	}
@@ -661,25 +790,67 @@ func createLLM() (llms.Model, error) {
 
 func createVisionLLM() (llms.Model, error) {
 	switch strings.ToLower(visionLlmProvider) {
+	case "mistral":
+		mistralApiKey := os.Getenv("MISTRAL_API_KEY")
+		if mistralApiKey == "" {
+			return nil, fmt.Errorf("Mistral API key is not set")
+		}
+		llm, err := openai.New(
+			openai.WithToken(mistralApiKey),
+			openai.WithModel(visionLlmModel),
+			openai.WithBaseURL("https://api.mistral.ai/v1"),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply rate limiting with isVision=true
+		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
 	case "openai":
 		if openaiAPIKey == "" {
 			return nil, fmt.Errorf("OpenAI API key is not set")
 		}
 
-		return openai.New(
+		options := []openai.Option{
 			openai.WithModel(visionLlmModel),
 			openai.WithToken(openaiAPIKey),
 			openai.WithHTTPClient(createCustomHTTPClient()),
-		)
+		}
+
+		if strings.ToLower(os.Getenv("OPENAI_API_TYPE")) == "azure" {
+			baseURL := os.Getenv("OPENAI_BASE_URL")
+			if baseURL == "" {
+				return nil, fmt.Errorf("OPENAI_BASE_URL is required for Azure OpenAI")
+			}
+			options = append(options,
+				openai.WithAPIType(openai.APITypeAzure),
+				openai.WithBaseURL(baseURL),
+				openai.WithEmbeddingModel("this-is-not-used"), // This is mandatory for Azure by langchain-go
+			)
+		}
+
+		llm, err := openai.New(options...)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply rate limiting with isVision=true
+		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
 	case "ollama":
 		host := os.Getenv("OLLAMA_HOST")
 		if host == "" {
 			host = "http://127.0.0.1:11434"
 		}
-		return ollama.New(
+		llm, err := ollama.New(
 			ollama.WithModel(visionLlmModel),
 			ollama.WithServerURL(host),
 		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply rate limiting with isVision=true
+		return NewRateLimitedLLM(llm, getRateLimitConfig(true)), nil
 	default:
 		log.Infoln("Vision LLM not enabled")
 		return nil, nil
