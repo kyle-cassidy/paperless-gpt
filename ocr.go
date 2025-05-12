@@ -45,6 +45,15 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 	}
 
 	docLogger := documentLogger(documentID)
+	docLogger.WithFields(logrus.Fields{
+		"createLocalHOCR": app.createLocalHOCR,
+		"localHOCRPath": app.localHOCRPath,
+		"createLocalPDF": app.createLocalPDF,
+		"localPDFPath": app.localPDFPath,
+		"uploadPDF": options.UploadPDF,
+		"replaceOriginal": options.ReplaceOriginal,
+		"copyMetadata": options.CopyMetadata,
+	}).Debug("OCR processing options")
 	docLogger.Info("Starting OCR processing")
 
 	// Skip OCR if the document already has the OCR complete tag
@@ -71,6 +80,7 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 	var hasHOCR bool
 
 	hocrCapable, hasHOCR = app.ocrProvider.(HOCRCapable)
+	docLogger.WithField("hasHOCR", hasHOCR).Debug("OCR provider hOCR capability check")
 
 	// Reset hOCR if the provider supports it
 	if hasHOCR {
@@ -162,11 +172,20 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 
 				// Save the hOCR to a file if enabled
 				if app.createLocalHOCR && app.localHOCRPath != "" {
+					docLogger.WithFields(logrus.Fields{
+						"createLocalHOCR": app.createLocalHOCR,
+						"localHOCRPath": app.localHOCRPath,
+					}).Debug("Attempting to save hOCR file")
 					if err := app.saveHOCRToFile(documentID, hOCR); err != nil {
 						docLogger.WithError(err).Error("Failed to save hOCR file")
 					} else {
 						docLogger.Info("Successfully saved hOCR file")
 					}
+				} else {
+					docLogger.WithFields(logrus.Fields{
+						"createLocalHOCR": app.createLocalHOCR,
+						"localHOCRPath": app.localHOCRPath,
+					}).Info("Skipping hOCR file creation - feature not enabled or path not set")
 				}
 
 				// Apply OCR to PDF if the feature is enabled
@@ -191,6 +210,7 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 						} else {
 							// Store PDF data in the processed document struct
 							processedDoc.PDFData = pdfData
+							docLogger.WithField("pdf_data_size", len(pdfData)).Debug("PDF data generated")
 
 							// Save the PDF to a file
 							if err := app.savePDFToFile(ctx, documentID, pdfData); err != nil {
@@ -201,18 +221,28 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 
 							// Upload PDF to paperless-ngx if requested
 							if options.UploadPDF && pdfData != nil {
+								docLogger.Debug("Starting PDF upload to paperless-ngx")
 								if err := app.uploadProcessedPDF(ctx, documentID, pdfData, options, docLogger); err != nil {
 									docLogger.WithError(err).Error("Failed to upload processed PDF")
 								}
+							} else {
+								docLogger.WithField("uploadPDF", options.UploadPDF).Debug("Skipping PDF upload to paperless-ngx")
 							}
 						}
 					}
+				} else {
+					docLogger.WithFields(logrus.Fields{
+						"createLocalPDF": app.createLocalPDF,
+						"localPDFPath": app.localPDFPath,
+					}).Info("Skipping PDF file creation - feature not enabled or path not set")
 				}
 			} else {
 				docLogger.WithError(err).Error("Failed to generate hOCR")
 			}
 		} else if err != nil {
 			docLogger.WithError(err).Error("Failed to create hOCR document")
+		} else {
+			docLogger.Error("HOCR document is nil")
 		}
 	}
 
@@ -223,18 +253,38 @@ func (app *App) ProcessDocumentOCR(ctx context.Context, documentID int, options 
 // saveHOCRToFile saves the hOCR HTML to a file
 // TODO: Implement a proper solution to store this alongside the document in Paperless
 func (app *App) saveHOCRToFile(documentID int, hOCR string) error {
+	// Add debugging
+	log := documentLogger(documentID)
+	log.WithFields(logrus.Fields{
+		"hocr_path": app.localHOCRPath,
+		"hocr_size": len(hOCR),
+	}).Debug("Attempting to save HOCR file")
+
 	// Ensure the directory exists
 	if err := os.MkdirAll(app.localHOCRPath, 0755); err != nil {
+		log.WithError(err).WithField("dir", app.localHOCRPath).Error("Failed to create HOCR directory")
 		return fmt.Errorf("failed to create HOCR output directory: %w", err)
 	}
 
 	// Create the file path
 	filename := fmt.Sprintf("%08d_paperless-gpt_ocr.hocr", documentID)
 	filePath := filepath.Join(app.localHOCRPath, filename)
+	log.WithField("filepath", filePath).Debug("HOCR file path created")
 
 	// Write the HOCR to the file
 	if err := os.WriteFile(filePath, []byte(hOCR), 0644); err != nil {
+		log.WithError(err).WithField("filepath", filePath).Error("Failed to write HOCR file")
 		return fmt.Errorf("failed to write HOCR file: %w", err)
+	}
+
+	// Verify file was created
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.WithField("filepath", filePath).Error("HOCR file not found after write operation")
+	} else {
+		log.WithFields(logrus.Fields{
+			"filepath": filePath,
+			"size": len(hOCR),
+		}).Info("HOCR file successfully saved")
 	}
 
 	return nil
@@ -242,8 +292,16 @@ func (app *App) saveHOCRToFile(documentID int, hOCR string) error {
 
 // savePDFToFile saves the PDF data to a file
 func (app *App) savePDFToFile(ctx context.Context, documentID int, pdfData []byte) error {
+	// Add debugging
+	log := documentLogger(documentID)
+	log.WithFields(logrus.Fields{
+		"pdf_path": app.localPDFPath,
+		"pdf_size": len(pdfData),
+	}).Debug("Attempting to save PDF file")
+
 	// Ensure the directory exists
 	if err := os.MkdirAll(app.localPDFPath, 0755); err != nil {
+		log.WithError(err).WithField("dir", app.localPDFPath).Error("Failed to create PDF directory")
 		return fmt.Errorf("failed to create PDF output directory: %w", err)
 	}
 
@@ -252,10 +310,22 @@ func (app *App) savePDFToFile(ctx context.Context, documentID int, pdfData []byt
 
 	// Create the file path
 	filePath := filepath.Join(app.localPDFPath, filename)
+	log.WithField("filepath", filePath).Debug("PDF file path created")
 
 	// Write the PDF to the file
 	if err := os.WriteFile(filePath, pdfData, 0644); err != nil {
+		log.WithError(err).WithField("filepath", filePath).Error("Failed to write PDF file")
 		return fmt.Errorf("failed to write PDF file: %w", err)
+	}
+
+	// Verify file was created
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.WithField("filepath", filePath).Error("PDF file not found after write operation")
+	} else {
+		log.WithFields(logrus.Fields{
+			"filepath": filePath,
+			"size": len(pdfData),
+		}).Info("PDF file successfully saved")
 	}
 
 	return nil
