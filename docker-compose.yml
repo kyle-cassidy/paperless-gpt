@@ -1,9 +1,51 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  paperless-gpt:
+    image: icereed/paperless-gpt:latest
+    environment:
+      # Using our existing env variables
+      PAPERLESS_BASE_URL: "http://delta-dms:8000"
+      PAPERLESS_API_TOKEN: "2a565750b033fc0ccd0c19b54303ca31e37ae254"
+      PAPERLESS_PUBLIC_URL: "http://localhost:8000"
+      
+      # Tags from our env
+      MANUAL_TAG: ${MANUAL_TAG}
+      AUTO_TAG: ${AUTO_TAG}
+      AUTO_OCR_TAG: ${AUTO_OCR_TAG}
+      
+      # LLM Configuration
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      LLM_MODEL: ${LLM_MODEL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_LOG: "debug"
+      
+      # OCR Configuration (using our existing Google DocAI setup)
+      OCR_PROVIDER: ${OCR_PROVIDER}
+      GOOGLE_PROJECT_ID: ${GOOGLE_PROJECT_ID}
+      GOOGLE_LOCATION: ${GOOGLE_LOCATION}
+      GOOGLE_PROCESSOR_ID: ${GOOGLE_PROCESSOR_ID}
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/google-credentials.json"
+      OCR_DEBUG: "true"
+      
+      # Other settings from our env
+      LOG_LEVEL: "debug"
+      GIN_MODE: "debug"
+      LLM_LANGUAGE: ${LLM_LANGUAGE}
+      TOKEN_LIMIT: ${TOKEN_LIMIT}
+    volumes:
+      - ./prompts:/app/prompts
+      - ./credentials/gmail-ai-autolabel-credentials.json:/app/google-credentials.json:ro
     ports:
       - "8080:8080"
-    env_file:
-      - .env
+    networks:
+      - default
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        mode: "non-blocking"
+
+networks:
+  default:
+    external: true
+    name: delta-internal
