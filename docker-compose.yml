@@ -5,7 +5,7 @@ services:
       # Using our existing env variables
       PAPERLESS_BASE_URL: "http://delta-dms:8000"
       PAPERLESS_API_TOKEN: "2a565750b033fc0ccd0c19b54303ca31e37ae254"
-      PAPERLESS_PUBLIC_URL: "http://localhost:8000"
+      # PAPERLESS_PUBLIC_URL: "http://127.0.0.1:8000"
       
       # Tags from our env
       MANUAL_TAG: ${MANUAL_TAG}
@@ -26,6 +26,9 @@ services:
       # API Keys
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_LOG: "debug"
+
+      # Mistral Configuration
+      MISTRAL_MODEL: "mistral-ocr-latest"
       MISTRAL_API_KEY: ${MISTRAL_API_KEY}
       
       # Ollama Configuration
@@ -74,6 +77,7 @@ services:
       - "8080:8080"
     networks:
       - default
+    restart: unless-stopped
     logging:
       driver: "json-file"
       options:
@@ -83,5 +87,4 @@ services:
 
 networks:
   default:
-    external: true
     name: delta-internal
