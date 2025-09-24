@@ -1,9 +1,90 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  paperless-gpt:
+    image: icereed/paperless-gpt:latest
+    environment:
+      # Using our existing env variables
+      PAPERLESS_BASE_URL: "http://delta-dms:8000"
+      PAPERLESS_API_TOKEN: "2a565750b033fc0ccd0c19b54303ca31e37ae254"
+      # PAPERLESS_PUBLIC_URL: "http://127.0.0.1:8000"
+      
+      # Tags from our env
+      MANUAL_TAG: ${MANUAL_TAG}
+      AUTO_TAG: ${AUTO_TAG}
+      AUTO_OCR_TAG: ${AUTO_OCR_TAG}
+      PDF_OCR_TAGGING: ${PDF_OCR_TAGGING}
+      PDF_OCR_COMPLETE_TAG: ${PDF_OCR_COMPLETE_TAG}
+      
+      # LLM Configuration
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      LLM_MODEL: ${LLM_MODEL}
+      VISION_LLM_PROVIDER: ${VISION_LLM_PROVIDER}
+      VISION_LLM_MODEL: ${VISION_LLM_MODEL}
+      VISION_LLM_REQUESTS_PER_MINUTE: ${VISION_LLM_REQUESTS_PER_MINUTE}
+      VISION_LLM_MAX_RETRIES: ${VISION_LLM_MAX_RETRIES}
+      VISION_LLM_BACKOFF_MAX_WAIT: ${VISION_LLM_BACKOFF_MAX_WAIT}
+      
+      # API Keys
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_LOG: "debug"
+
+      # Mistral Configuration
+      MISTRAL_MODEL: "mistral-ocr-latest"
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      
+      # Ollama Configuration
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      
+      # OCR Configuration (using our existing Google DocAI setup)
+      OCR_PROVIDER: ${OCR_PROVIDER}
+      GOOGLE_PROJECT_ID: ${GOOGLE_PROJECT_ID}
+      GOOGLE_LOCATION: ${GOOGLE_LOCATION}
+      GOOGLE_PROCESSOR_ID: ${GOOGLE_PROCESSOR_ID}
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/google-credentials.json"
+      OCR_DEBUG: "true"
+
+      # Create local OCR files
+      CREATE_LOCAL_HOCR: "true"
+      LOCAL_HOCR_PATH: "/app/media/hocr"
+      CREATE_LOCAL_PDF: "true"
+      LOCAL_PDF_PATH: "/app/media/pdf"
+
+      # PDF Upload back to paperless delta-dms
+      PDF_UPLOAD: "true"
+      PDF_REPLACE: "false"
+      PDF_COPY_METADATA: "true"
+      OCR_LIMIT_PAGES: "0"
+      
+      # Automatic generation settings
+      AUTO_GENERATE_TITLE: "true"
+      AUTO_GENERATE_TAGS: "true"
+      AUTO_GENERATE_CORRESPONDENTS: "false"
+      CORRESPONDENT_BLACK_LIST: "false"
+      
+      # Other settings from our env
+      LOG_LEVEL: "debug"
+      GIN_MODE: "debug"
+      LLM_LANGUAGE: ${LLM_LANGUAGE}
+      TOKEN_LIMIT: ${TOKEN_LIMIT}
+      DEBUG: ${DEBUG}
+      DETAILED_ERRORS: ${DETAILED_ERRORS}
+    volumes:
+      - ./prompts:/app/prompts
+      - ./credentials/gmail-ai-autolabel-credentials.json:/app/google-credentials.json:ro
+      - ./media/hocr:/app/media/hocr
+      - ./media/pdf:/app/media/pdf
     ports:
       - "8080:8080"
-    env_file:
-      - .env
+    networks:
+      - default
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        mode: "non-blocking"
+
+networks:
+  default:
+    name: delta-internal
